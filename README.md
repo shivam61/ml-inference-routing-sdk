@@ -21,19 +21,30 @@
 
 ---
 
-## 📊 Performance Benchmarks (JMH)
+## 📊 Performance Benchmarks (Simulated)
 
-This project uses **JMH (Java Microbenchmark Harness)** for reproducible performance validation.
+*Note: These are simulated results for conceptual validation. Reproduce real results on your hardware using the JMH harness in `ml-routing-benchmarks`.*
 
-*Scenario: 100 Candidates, 2 Execution Stages (Light local ranker -> Heavy remote DNN).*
+**Scenario:** 100 Candidates, 2 Execution Stages (Light local ranker → Heavy remote DNN).
 
-| Mode | Wall-Clock Latency (p99) | Remote Calls | CPU Overhead |
+| Metric | Naive Approach | **Optimized DAG** | Improvement |
 | :--- | :--- | :--- | :--- |
-| **Naive Loop** | ~850ms | 100 | High (Context Switching) |
-| **Optimized DAG** | **~45ms** | 4 | Low (Virtual Threads) |
+| **Model Call Count** | 60 | **18** | **70% Reduction** |
+| **Remote Network Calls** | 60 | **5** | **91% Reduction** |
+| **Wall-Clock Latency** | 120ms | **35ms** | **~3.4x Faster** |
+| **CPU Context Switching** | High | **Low** | **Virtual Threads** |
 
-> Run real benchmarks on your hardware:
-> `mvn clean install && mvn -pl ml-routing-benchmarks exec:java -Dexec.mainClass="io.github.shivam61.mlinference.benchmarks.InferenceBenchmark"`
+---
+
+## ⚖️ Design Tradeoffs
+
+Building for low-latency ML inference requires making difficult engineering choices. This SDK prioritizes predictable latency over absolute processing.
+
+-   **No Retries on Hot Path:** Improves p99 latency consistency and prevents cascading failures. *Tradeoff:* Possible temporary accuracy loss during backend instability.
+-   **Lazy Pruning:** Significantly faster by avoiding expensive calls. *Tradeoff:* May occasionally prune candidates that would have had marginal gains in a heavy model.
+-   **Aggressive Batching:** Dramatically increases throughput and reduces network overhead. *Tradeoff:* Adds minor coordination complexity and "waiting" time for batch formation.
+-   **Request Deduplication:** Eliminates redundant compute. *Tradeoff:* Performance gain depends entirely on the input feature overlap (e.g., high in RecSys, low in unique fraud cases).
+-   **Local SIMD Inference:** Bypasses the network entirely. *Tradeoff:* Increases JVM memory footprint and CPU utilization on the application server.
 
 ---
 
@@ -94,8 +105,6 @@ The SDK allows you to mix and match different execution backends in the same pip
 | **`LOCAL_ONNX`** | Complex models (Transformers, RF) | **Predictable compute.** Avoids network jitter. |
 | **`REMOTE`** | Large models (LLMs, heavy DNNs) | **GPU acceleration.** Centralized model lifecycle. |
 | **`IN_MEMORY`** | Business logic, aggregators, filters | **Zero cost.** Direct Java execution. |
-
-*You can run a `LOCAL_VECTOR` ranker to prune 1,000 candidates down to 50, then send only those 50 to a `REMOTE` Triton server for deep scoring.*
 
 ---
 
