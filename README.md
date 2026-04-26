@@ -9,21 +9,44 @@
 
 ---
 
+## 🏗️ System Architecture
+
+```mermaid
+graph TD
+    A[Incoming Request] --> B[Routing Engine]
+    B -->|Resolves Rules| C[Execution Planner]
+    C -->|Builds DAG| D[Inference Executor]
+    
+    subgraph Parallel Execution Stages
+        D -->|Stage 0| E[Light Ranker / Risk Model]
+        D -->|Stage 0| F[Feature Extractor]
+        
+        E -->|Lazy Prune| G[Deep Ranker]
+        F --> G
+        
+        G -->|Stage 2| H[Final Aggregator]
+    end
+    
+    H --> I[Inference Result + Explainability Stats]
+```
+
+---
+
 ## 💎 Why Use This SDK? (Engineering Impact)
 
 | Feature | Engineering Logic | Performance Impact |
 | :--- | :--- | :--- |
 | **Concurrency** | Uses **Project Loom Virtual Threads** | Handles 10k+ concurrent model calls with negligible RAM overhead. |
 | **Batching** | Groups candidate entities into optimal chunks | Reduces remote gRPC/REST round-trips by **10x-50x**. |
-| **Deduplication** | **Canonical Hashing** (xxHash/Murmur3 style) | Eliminates redundant computation for repeat items in <1μs. |
-| **Resiliency** | **Structured Concurrency** & Circuit Breakers | Uses `StructuredTaskScope` for robust stage cancellation and load shedding. |
+| **Deduplication** | **Canonical Hashing** (Murmur3 style) | Eliminates redundant computation for repeat items in <1μs. |
+| **Resiliency** | **Circuit Breakers** & Deadline Propagation | Instant load shedding. Prevents a slow model from taking down the JVM. |
 | **Fast Path** | **Local SIMD (Vector API)** Inference | Executing dense layers locally in **<50μs**, bypassing network hops. |
 
 ---
 
 ## 📊 Performance Benchmarks (Simulated)
 
-*Note: These are simulated results for conceptual validation. Reproduce real results on your hardware using the JMH harness in `ml-routing-benchmarks`.*
+*Note: These are simulated results for conceptual validation. See **[Benchmark Report](docs/benchmarks/reproducible-results.md)** for details.*
 
 **Scenario:** 100 Candidates, 2 Execution Stages (Light local ranker → Heavy remote DNN).
 
@@ -32,48 +55,35 @@
 | **Model Call Count** | 60 | **18** | **70% Reduction** |
 | **Remote Network Calls** | 60 | **5** | **91% Reduction** |
 | **Wall-Clock Latency** | 120ms | **35ms** | **~3.4x Faster** |
-| **CPU Context Switching** | High | **Low** | **Virtual Threads** |
 
 ---
 
 ## ⚖️ Design Tradeoffs
 
-Building for low-latency ML inference requires making difficult engineering choices. This SDK prioritizes predictable latency over absolute processing.
-
--   **No Retries on Hot Path:** Improves p99 latency consistency and prevents cascading failures. *Tradeoff:* Possible temporary accuracy loss during backend instability.
--   **Lazy Pruning:** Significantly faster by avoiding expensive calls. *Tradeoff:* May occasionally prune candidates that would have had marginal gains in a heavy model.
--   **Aggressive Batching:** Dramatically increases throughput and reduces network overhead. *Tradeoff:* Adds minor coordination complexity and "waiting" time for batch formation.
--   **Request Deduplication:** Eliminates redundant compute. *Tradeoff:* Performance gain depends entirely on the input feature overlap (e.g., high in RecSys, low in unique fraud cases).
--   **Local SIMD Inference:** Bypasses the network entirely. *Tradeoff:* Increases JVM memory footprint and CPU utilization on the application server.
+- **No Retries on Hot Path:** Prioritizes predictable p99 latency over absolute processing. *Tradeoff:* Minor accuracy loss if a model is transiently unavailable.
+- **Lazy Pruning:** Drastically reduces backend load. *Tradeoff:* Risk of pruning candidates that might have scored well in a heavier model.
+- **Batching:** Increases throughput. *Tradeoff:* Minor coordination overhead for batch formation.
+- **Local SIMD Inference:** Bypasses network latency. *Tradeoff:* Increases JVM memory footprint and CPU pressure on the application server.
 
 ---
 
-## 🏗️ Ecosystem & Modules
+## 🛠️ Model Selection Decision Framework
 
-- **`ml-routing-core`**: The brain. DAG planning, Batching, and **Structured Concurrency**.
-- **`ml-routing-spring-boot-starter`**: Drop-in auto-configuration for Spring Boot 3.
-- **`ml-routing-micrometer`**: Out-of-the-box metrics for Prometheus/Grafana.
-- **`ml-routing-clients`**: Standardized adapters for **NVIDIA Triton** and **TF Serving**.
-- **`ml-routing-vector-inference`**: Local SIMD engine (Requires `--add-modules jdk.incubator.vector`).
-- **`ml-routing-onnx`**: Local execution for complex models.
+| Backend Type | Use When... | Key Advantage |
+| :--- | :--- | :--- |
+| **`LOCAL_VECTOR`** | Small dense models, ultra-low latency (<50μs) | **Zero network overhead.** |
+| **`LOCAL_ONNX`** | Complex pre-trained models (Transformers) | **Predictable compute**, no network jitter. |
+| **`REMOTE`** | Large models needing GPU (LLMs) | **Nvidia Triton / TF Serving integration.** |
+| **`IN_MEMORY`** | Fast filters or logical aggregators | **Minimal footprint.** |
 
 ---
 
-## 🛠️ Usage (Spring Boot)
+## ⚠️ Known Limitations
+- **Statelessness:** Optimized for stateless inference; cross-request state is not natively supported.
+- **Dynamic DAGs:** The execution plan is built once per request context and cannot be modified mid-flight.
+- **Resource Isolation:** While circuit breakers protect backends, extreme JVM-wide starvation (e.g., GC pauses) cannot be mitigated.
 
-Simply add the dependency and your `model-registry.yaml`. The SDK will auto-configure the `InferenceExecutor`.
-
-```java
-@Autowired
-private InferenceExecutor executor;
-
-public InferenceResult getRecommendations(List<Candidate> candidates) {
-    InferencePlan plan = planner.plan(Set.of("ranking_model"));
-    RequestContext ctx = new RequestContext("id", "REC", Instant.now(), Instant.now().plusMillis(100), Map.of(), candidates, Map.of());
-    
-    return executor.execute(plan, ctx).get();
-}
-```
+---
 
 ## 🚀 Quick Start
 
@@ -88,41 +98,10 @@ mvn -pl ml-routing-examples exec:java -Dexec.mainClass="io.github.shivam61.mlinf
 
 # 2. Run the Deadline Stress Demo (Resiliency & Fallbacks)
 mvn -pl ml-routing-examples exec:java -Dexec.mainClass="io.github.shivam61.mlinference.examples.DeadlineStressExample"
-
-# 3. Run the Deduplication Demo (Hashing & Efficiency)
-mvn -pl ml-routing-examples exec:java -Dexec.mainClass="io.github.shivam61.mlinference.examples.DedupExample"
 ```
 
----
-
-## ⚖️ Model Selection Decision Framework
-
-The SDK allows you to mix and match different execution backends in the same pipeline. Use this guide to choose:
-
-| Backend Type | Use When... | Key Advantage |
-| :--- | :--- | :--- |
-| **`LOCAL_VECTOR`** | Small/Medium dense models (Linear/ReLU) | **Ultra-low latency (<50μs).** No network hop. |
-| **`LOCAL_ONNX`** | Complex models (Transformers, RF) | **Predictable compute.** Avoids network jitter. |
-| **`REMOTE`** | Large models (LLMs, heavy DNNs) | **GPU acceleration.** Centralized model lifecycle. |
-| **`IN_MEMORY`** | Business logic, aggregators, filters | **Zero cost.** Direct Java execution. |
-
----
-
-## 🧠 Post-Execution Explainability
-
-Every result contains a detailed `ExecutionStats` object. The SDK can tell you exactly how many items were pruned, how many deduplication hits occurred, and which models triggered fallbacks due to latency spikes. Use `result.stats().explain()` to get a human-readable summary.
-
----
-
-## 🤖 AI Agent Ready
-Designed for autonomous integration. AI Agents (Cursor, Windsurf) can use our **[AI Integration Guide](docs/ai-integration.md)** and **`.cursorrules`** to safely extend the framework with zero hallucinations.
-
 ## 📚 Documentation
-
-The full documentation is available at **[shivam61.github.io/ml-inference-routing-sdk](https://shivam61.github.io/ml-inference-routing-sdk/)**.
-
-- [AI Agent Integration Guide](docs/ai-integration.md)
+- [Architecture Overview](docs/architecture.md)
 - [Execution Model & Optimizations](docs/execution-model.md)
 - [Local Vectorized Inference (SIMD)](docs/local-vectorized-inference.md)
-- [Observability & Tracing](docs/observability.md)
-- [Project Roadmap](docs/roadmap.md)
+- [Benchmark Results](docs/benchmarks/reproducible-results.md)
