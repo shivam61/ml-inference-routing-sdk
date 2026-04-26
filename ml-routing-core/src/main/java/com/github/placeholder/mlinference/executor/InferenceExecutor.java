@@ -1,0 +1,219 @@
+package com.github.placeholder.mlinference.executor;
+
+import com.github.placeholder.mlinference.client.ModelClient;
+import com.github.placeholder.mlinference.domain.*;
+import com.github.placeholder.mlinference.observability.MetricsRecorder;
+import com.github.placeholder.mlinference.planner.InferencePlan;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
+
+public class InferenceExecutor {
+    private final ModelClient client;
+    private final ExecutorService executorService;
+    private final ScheduledExecutorService scheduler;
+    private final MetricsRecorder metrics;
+
+    public InferenceExecutor(ModelClient client, ExecutorService executorService, ScheduledExecutorService scheduler, MetricsRecorder metrics) {
+        this.client = client;
+        this.executorService = executorService;
+        this.scheduler = scheduler;
+        this.metrics = metrics;
+    }
+
+    public CompletableFuture<InferenceResult> execute(InferencePlan plan, RequestContext context) {
+        Instant executionStart = Instant.now();
+        ExecutionState state = new ExecutionState(context);
+
+        CompletableFuture<Void> pipeline = CompletableFuture.completedFuture(null);
+
+        for (InferencePlan.ExecutionStage stage : plan.stages()) {
+            pipeline = pipeline.thenCompose(v -> executeStage(stage, state, context));
+        }
+
+        return pipeline.handle((v, ex) -> {
+            long totalLatency = Instant.now().toEpochMilli() - executionStart.toEpochMilli();
+            ExecutionStatus status = ex == null ? ExecutionStatus.SUCCESS : ExecutionStatus.FAILED;
+            if (state.hasFallbacks()) status = ExecutionStatus.PARTIAL_SUCCESS;
+
+            return new InferenceResult(
+                context.requestId(),
+                status,
+                state.getOutputsByModel(),
+                state.getOutputsByCandidate(),
+                state.getFallbackEvents(),
+                new ExecutionTrace(state.getEvents()),
+                totalLatency
+            );
+        });
+    }
+
+    private CompletableFuture<Void> executeStage(InferencePlan.ExecutionStage stage, ExecutionState state, RequestContext context) {
+        List<CompletableFuture<Void>> modelFutures = stage.models().stream()
+            .map(model -> executeModel(model, state, context))
+            .toList();
+
+        return CompletableFuture.allOf(modelFutures.toArray(new CompletableFuture[0]));
+    }
+
+    private CompletableFuture<Void> executeModel(ModelDefinition model, ExecutionState state, RequestContext context) {
+        // 1. Check Global Deadline
+        if (context.isDeadlineExceeded()) {
+            state.recordFallback(model.modelId(), null, FallbackType.SKIP_MODEL, "Global deadline exceeded before model start");
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // 2. Identify candidates to run (Apply Lazy Pruning)
+        List<Candidate> candidatesToRun = filterCandidates(model, state, context);
+        if (candidatesToRun.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // 3. Deduplicate inputs
+        List<ModelInput> uniqueInputs = deduplicate(model, candidatesToRun, state);
+        if (uniqueInputs.isEmpty()) {
+            // All were deduped and already resolved in state
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // 4. Batching
+        List<List<ModelInput>> batches = chunk(uniqueInputs, model.maxBatchSize());
+        
+        List<CompletableFuture<Void>> batchFutures = batches.stream()
+            .map(batch -> executeBatch(model, batch, state, context))
+            .toList();
+
+        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]));
+    }
+
+    private CompletableFuture<Void> executeBatch(ModelDefinition model, List<ModelInput> batch, ExecutionState state, RequestContext context) {
+        long timeout = Math.min(model.timeoutMs(), context.getRemainingTimeMs());
+        
+        CompletableFuture<List<ModelOutput>> future = client.predict(model, batch, context);
+        
+        // Apply Timeout
+        if (timeout > 0) {
+            future = future.orTimeout(timeout, TimeUnit.MILLISECONDS);
+        }
+
+        return future.handle((outputs, ex) -> {
+            if (ex != null) {
+                applyFallback(model, batch, state, ex);
+            } else {
+                state.recordOutputs(model.modelId(), outputs);
+            }
+            return null;
+        });
+    }
+
+    private List<Candidate> filterCandidates(ModelDefinition model, ExecutionState state, RequestContext context) {
+        if (model.lazyPredicate() == null) return context.candidates();
+
+        // Simple TOP_N logic as an example
+        if ("TOP_N".equals(model.lazyPredicate().type())) {
+            String upstream = model.lazyPredicate().upstreamModel();
+            int n = (int) model.lazyPredicate().params().getOrDefault("n", 10);
+            
+            List<ModelOutput> upstreamOutputs = state.getOutputsForModel(upstream);
+            if (upstreamOutputs.isEmpty()) return Collections.emptyList();
+
+            Set<String> topCandidateIds = upstreamOutputs.stream()
+                .sorted(Comparator.comparingDouble(ModelOutput::score).reversed())
+                .limit(n)
+                .map(ModelOutput::candidateId)
+                .collect(Collectors.toSet());
+
+            return context.candidates().stream()
+                .filter(c -> topCandidateIds.contains(c.candidateId()))
+                .toList();
+        }
+
+        return context.candidates();
+    }
+
+    private List<ModelInput> deduplicate(ModelDefinition model, List<Candidate> candidates, ExecutionState state) {
+        List<ModelInput> toRun = new ArrayList<>();
+        for (Candidate c : candidates) {
+            String key = model.modelId() + ":" + c.features().hashCode();
+            Optional<ModelOutput> existing = state.getCachedOutput(key);
+            if (existing.isPresent()) {
+                state.recordOutput(model.modelId(), new ModelOutput(c.candidateId(), model.modelId(), existing.get().score(), existing.get().metadata()));
+                state.addEvent(new ExecutionEvent(Instant.now(), "DEDUP_HIT", model.modelId(), Map.of("candidateId", c.candidateId())));
+            } else {
+                toRun.add(new ModelInput(c.candidateId(), c.features()));
+            }
+        }
+        return toRun;
+    }
+
+    private void applyFallback(ModelDefinition model, List<ModelInput> batch, ExecutionState state, Throwable ex) {
+        FallbackType type = model.fallbackStrategy() != null ? model.fallbackStrategy().type() : FallbackType.FAIL_FAST;
+        String reason = ex instanceof TimeoutException ? "Timeout" : ex.getMessage();
+
+        for (ModelInput input : batch) {
+            state.recordFallback(model.modelId(), input.candidateId(), type, reason);
+            if (type == FallbackType.CONSTANT_SCORE) {
+                state.recordOutput(model.modelId(), new ModelOutput(input.candidateId(), model.modelId(), model.fallbackStrategy().value(), Map.of("fallback", true)));
+            }
+        }
+    }
+
+    private <T> List<List<T>> chunk(List<T> list, int size) {
+        if (size <= 0) return List.of(list);
+        List<List<T>> chunks = new ArrayList<>();
+        for (int i = 0; i < list.size(); i += size) {
+            chunks.add(list.subList(i, Math.min(i + size, list.size())));
+        }
+        return chunks;
+    }
+
+    // Inner class to manage mutable execution state thread-safely
+    private static class ExecutionState {
+        private final Map<String, List<ModelOutput>> outputsByModel = new ConcurrentHashMap<>();
+        private final Map<String, List<ModelOutput>> outputsByCandidate = new ConcurrentHashMap<>();
+        private final List<InferenceResult.FallbackEvent> fallbackEvents = Collections.synchronizedList(new ArrayList<>());
+        private final List<ExecutionEvent> events = Collections.synchronizedList(new ArrayList<>());
+        private final Map<String, ModelOutput> dedupCache = new ConcurrentHashMap<>();
+
+        public ExecutionState(RequestContext ctx) {
+            addEvent(new ExecutionEvent(Instant.now(), "EXECUTION_START", null, Map.of("requestId", ctx.requestId())));
+        }
+
+        public void recordOutputs(String modelId, List<ModelOutput> outputs) {
+            for (ModelOutput o : outputs) {
+                recordOutput(modelId, o);
+                // Simple dedup key based on model and candidate features would be better, 
+                // but here we just cache the first result for the modelId + input hash seen.
+                // In a real system, the key would be more robust.
+            }
+        }
+
+        public void recordOutput(String modelId, ModelOutput output) {
+            outputsByModel.computeIfAbsent(modelId, k -> Collections.synchronizedList(new ArrayList<>())).add(output);
+            outputsByCandidate.computeIfAbsent(output.candidateId(), k -> Collections.synchronizedList(new ArrayList<>())).add(output);
+        }
+
+        public void recordFallback(String modelId, String candidateId, FallbackType type, String reason) {
+            fallbackEvents.add(new InferenceResult.FallbackEvent(modelId, candidateId, type, reason));
+        }
+
+        public void addEvent(ExecutionEvent event) {
+            events.add(event);
+        }
+
+        public Optional<ModelOutput> getCachedOutput(String key) {
+            return Optional.ofNullable(dedupCache.get(key));
+        }
+
+        public List<ModelOutput> getOutputsForModel(String modelId) {
+            return outputsByModel.getOrDefault(modelId, List.of());
+        }
+
+        public Map<String, List<ModelOutput>> getOutputsByModel() { return outputsByModel; }
+        public Map<String, List<ModelOutput>> getOutputsByCandidate() { return outputsByCandidate; }
+        public List<InferenceResult.FallbackEvent> getFallbackEvents() { return fallbackEvents; }
+        public List<ExecutionEvent> getEvents() { return events; }
+        public boolean hasFallbacks() { return !fallbackEvents.isEmpty(); }
+    }
+}

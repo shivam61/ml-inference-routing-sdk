@@ -1,0 +1,48 @@
+models:
+  - modelId: light_ranker
+    modelFamily: ranking
+    version: v1
+    backendType: LOCAL_VECTOR
+    timeoutMs: 5
+    maxBatchSize: 64
+    dependencies: []
+    fallbackStrategy:
+      type: CONSTANT_SCORE
+      value: 0.0
+
+  - modelId: deep_ranker
+    modelFamily: ranking
+    version: v1
+    backendType: REMOTE
+    timeoutMs: 20
+    maxBatchSize: 32
+    dependencies:
+      - light_ranker
+    lazyPredicate:
+      type: TOP_N
+      upstreamModel: light_ranker
+      params:
+        n: 5
+    fallbackStrategy:
+      type: DEFAULT_OUTPUT
+
+  - modelId: risk_score
+    modelFamily: risk
+    version: v1
+    backendType: REMOTE
+    timeoutMs: 15
+    maxBatchSize: 32
+    dependencies: []
+    fallbackStrategy:
+      type: CONSTANT_SCORE
+      value: 0.5
+
+  - modelId: final_score
+    modelFamily: final
+    version: v1
+    backendType: IN_MEMORY
+    timeoutMs: 5
+    maxBatchSize: 128
+    dependencies:
+      - deep_ranker
+      - risk_score

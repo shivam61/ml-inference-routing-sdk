@@ -1,0 +1,8 @@
+rules:
+  - ruleId: search_full_ranking
+    priority: 100
+    enabled: true
+    condition:
+      requestType: SEARCH
+    selectedModels:
+      - final_score
