@@ -126,7 +126,7 @@ public class InferenceExecutor implements AutoCloseable {
             } else {
                 outputs = future.get();
             }
-            state.recordOutputs(model.modelId(), outputs);
+            state.recordOutputs(model.modelId(), outputs, batch);
             cb.recordSuccess();
         } catch (Exception ex) {
             cb.recordFailure();
@@ -214,12 +214,19 @@ public class InferenceExecutor implements AutoCloseable {
             addEvent(new ExecutionEvent(Instant.now(), "EXECUTION_START", null, Map.of("requestId", ctx.requestId())));
         }
 
-        public void recordOutputs(String modelId, List<ModelOutput> outputs) {
+        public void recordOutputs(String modelId, List<ModelOutput> outputs, List<ModelInput> originalBatch) {
+            Map<String, ModelInput> inputMap = originalBatch.stream()
+                .collect(Collectors.toMap(ModelInput::candidateId, i -> i));
+
             for (ModelOutput o : outputs) {
                 recordOutput(modelId, o);
-                // Simple dedup key based on model and candidate features would be better, 
-                // but here we just cache the first result for the modelId + input hash seen.
-                // In a real system, the key would be more robust.
+                
+                // Cache for deduplication: modelId + features hash
+                ModelInput input = inputMap.get(o.candidateId());
+                if (input != null) {
+                    String key = modelId + ":" + input.features().hashCode();
+                    dedupCache.putIfAbsent(key, o);
+                }
             }
         }
 
