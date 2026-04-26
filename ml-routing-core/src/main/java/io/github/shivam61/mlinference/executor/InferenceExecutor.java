@@ -47,6 +47,17 @@ public class InferenceExecutor implements AutoCloseable {
             ExecutionStatus status = state.hasErrors() ? ExecutionStatus.FAILED : 
                                    (state.hasFallbacks() ? ExecutionStatus.PARTIAL_SUCCESS : ExecutionStatus.SUCCESS);
 
+            ExecutionStats stats = new ExecutionStats(
+                plan.stages().size(),
+                (int) plan.stages().stream().mapToLong(s -> s.models().size()).sum(),
+                state.getBatchSizes(),
+                state.getDedupHits(),
+                state.getPrunedCount(),
+                state.getFallbackEvents().size(),
+                state.getTimeoutCount(),
+                totalLatency
+            );
+
             return new InferenceResult(
                 context.requestId(),
                 status,
@@ -54,6 +65,7 @@ public class InferenceExecutor implements AutoCloseable {
                 state.getOutputsByCandidate(),
                 state.getFallbackEvents(),
                 new ExecutionTrace(state.getEvents()),
+                stats,
                 totalLatency
             );
         }, vThreadExecutor);
@@ -97,7 +109,9 @@ public class InferenceExecutor implements AutoCloseable {
 
         int originalCount = context.candidates().size();
         if (candidatesToRun.size() < originalCount) {
-            metrics.recordCounter("inference.pruned.count", originalCount - candidatesToRun.size(), Map.of("modelId", model.modelId()));
+            int pruned = originalCount - candidatesToRun.size();
+            state.incrementPrunedCount(pruned);
+            metrics.recordCounter("inference.pruned.count", pruned, Map.of("modelId", model.modelId()));
         }
 
         // 3. Deduplicate inputs
@@ -161,6 +175,7 @@ public class InferenceExecutor implements AutoCloseable {
             if (existing.isPresent()) {
                 state.recordOutput(model.modelId(), new ModelOutput(c.candidateId(), model.modelId(), existing.get().score(), existing.get().metadata()));
                 state.addEvent(new ExecutionEvent(Instant.now(), "DEDUP_HIT", model.modelId(), Map.of("candidateId", c.candidateId())));
+                state.incrementDedupHits();
                 metrics.recordCounter("inference.dedup.hit.count", 1, Map.of("modelId", model.modelId()));
             } else {
                 toRun.add(new ModelInput(c.candidateId(), c.features()));
@@ -229,6 +244,10 @@ public class InferenceExecutor implements AutoCloseable {
         private final List<InferenceResult.FallbackEvent> fallbackEvents = Collections.synchronizedList(new ArrayList<>());
         private final List<ExecutionEvent> events = Collections.synchronizedList(new ArrayList<>());
         private final Map<String, ModelOutput> dedupCache = new ConcurrentHashMap<>();
+        private final Map<String, Integer> batchSizes = new ConcurrentHashMap<>();
+        private final java.util.concurrent.atomic.LongAdder dedupHits = new java.util.concurrent.atomic.LongAdder();
+        private final java.util.concurrent.atomic.LongAdder prunedCount = new java.util.concurrent.atomic.LongAdder();
+        private final java.util.concurrent.atomic.LongAdder timeoutCount = new java.util.concurrent.atomic.LongAdder();
         private boolean hasErrors = false;
 
         public ExecutionState(RequestContext ctx) {
@@ -236,6 +255,7 @@ public class InferenceExecutor implements AutoCloseable {
         }
 
         public void recordOutputs(String modelId, List<ModelOutput> outputs, List<ModelInput> originalBatch) {
+            batchSizes.put(modelId, originalBatch.size());
             Map<String, ModelInput> inputMap = originalBatch.stream()
                 .collect(Collectors.toMap(ModelInput::candidateId, i -> i));
             
@@ -261,17 +281,16 @@ public class InferenceExecutor implements AutoCloseable {
 
         public void recordFallback(String modelId, String candidateId, FallbackType type, String reason) {
             fallbackEvents.add(new InferenceResult.FallbackEvent(modelId, candidateId, type, reason));
+            if ("Timeout".equals(reason)) {
+                timeoutCount.increment();
+            }
             if (type == FallbackType.FAIL_FAST) {
                 hasErrors = true;
             }
         }
 
-        public void addEvent(ExecutionEvent event) {
-            events.add(event);
-            if ("PIPELINE_ERROR".equals(event.eventType())) {
-                hasErrors = true;
-            }
-        }
+        public void incrementDedupHits() { dedupHits.increment(); }
+        public void incrementPrunedCount(int count) { prunedCount.add(count); }
 
         public Optional<ModelOutput> getCachedOutput(String key) {
             return Optional.ofNullable(dedupCache.get(key));
@@ -287,5 +306,9 @@ public class InferenceExecutor implements AutoCloseable {
         public List<ExecutionEvent> getEvents() { return events; }
         public boolean hasFallbacks() { return !fallbackEvents.isEmpty(); }
         public boolean hasErrors() { return hasErrors; }
+        public int getDedupHits() { return dedupHits.intValue(); }
+        public int getPrunedCount() { return prunedCount.intValue(); }
+        public int getTimeoutCount() { return timeoutCount.intValue(); }
+        public Map<String, Integer> getBatchSizes() { return batchSizes; }
     }
 }

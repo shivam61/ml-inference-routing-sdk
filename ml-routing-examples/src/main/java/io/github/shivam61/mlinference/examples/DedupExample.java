@@ -41,10 +41,7 @@ public class DedupExample {
 
         executor.execute(plan, context).thenAccept(result -> {
             System.out.println("Total Outputs: " + result.outputsByCandidate().size());
-            long dedupHits = result.executionTrace().events().stream()
-                .filter(e -> "DEDUP_HIT".equals(e.eventType()))
-                .count();
-            System.out.println("Deduplication Hits: " + dedupHits);
+            System.out.println(result.stats().explain());
             System.out.println("Expectation: c2 should be served from c1's result cache.");
             System.exit(0);
         });

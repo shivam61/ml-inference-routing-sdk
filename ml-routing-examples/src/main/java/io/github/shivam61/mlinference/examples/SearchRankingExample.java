@@ -79,15 +79,13 @@ public class SearchRankingExample {
         System.out.println("Selected Models: " + selectedModels);
 
         InferencePlan plan = planner.plan(selectedModels);
-        System.out.println("Execution Plan Stages: " + plan.stages().size());
-        for (InferencePlan.ExecutionStage stage : plan.stages()) {
-            System.out.println("  Stage " + stage.stageNumber() + ": " + stage.models().stream().map(ModelDefinition::modelId).toList());
-        }
+        System.out.println(plan.explain());
 
         executor.execute(plan, context).thenAccept(result -> {
             System.out.println("\n--- Execution Result ---");
             System.out.println("Status: " + result.status());
-            System.out.println("Total Latency: " + result.totalLatencyMs() + "ms");
+            System.out.println(result.stats().explain());
+            
             System.out.println("Models executed: " + result.outputsByModel().keySet());
             
             List<ModelOutput> finalScores = result.outputsByModel().get("final_score");

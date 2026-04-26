@@ -11,6 +11,7 @@ public record InferenceResult(
     Map<String, List<ModelOutput>> outputsByCandidate,
     List<FallbackEvent> fallbackEvents,
     ExecutionTrace executionTrace,
+    ExecutionStats stats,
     long totalLatencyMs
 ) {
     public record FallbackEvent(

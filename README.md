@@ -64,6 +64,50 @@ public InferenceResult getRecommendations(List<Candidate> candidates) {
 }
 ```
 
+## 🚀 Quick Start
+
+```bash
+# Clone and Build
+git clone https://github.com/shivam61/ml-inference-routing-sdk.git
+cd ml-inference-routing-sdk
+mvn clean install
+
+# 1. Run the Multi-Stage Search Ranking Demo (Explainability & Stages)
+mvn -pl ml-routing-examples exec:java -Dexec.mainClass="io.github.shivam61.mlinference.examples.SearchRankingExample"
+
+# 2. Run the Deadline Stress Demo (Resiliency & Fallbacks)
+mvn -pl ml-routing-examples exec:java -Dexec.mainClass="io.github.shivam61.mlinference.examples.DeadlineStressExample"
+
+# 3. Run the Deduplication Demo (Hashing & Efficiency)
+mvn -pl ml-routing-examples exec:java -Dexec.mainClass="io.github.shivam61.mlinference.examples.DedupExample"
+```
+
+---
+
+## ⚖️ Model Selection Decision Framework
+
+The SDK allows you to mix and match different execution backends in the same pipeline. Use this guide to choose:
+
+| Backend Type | Use When... | Key Advantage |
+| :--- | :--- | :--- |
+| **`LOCAL_VECTOR`** | Small/Medium dense models (Linear/ReLU) | **Ultra-low latency (<50μs).** No network hop. |
+| **`LOCAL_ONNX`** | Complex models (Transformers, RF) | **Predictable compute.** Avoids network jitter. |
+| **`REMOTE`** | Large models (LLMs, heavy DNNs) | **GPU acceleration.** Centralized model lifecycle. |
+| **`IN_MEMORY`** | Business logic, aggregators, filters | **Zero cost.** Direct Java execution. |
+
+*You can run a `LOCAL_VECTOR` ranker to prune 1,000 candidates down to 50, then send only those 50 to a `REMOTE` Triton server for deep scoring.*
+
+---
+
+## 🧠 Post-Execution Explainability
+
+Every result contains a detailed `ExecutionStats` object. The SDK can tell you exactly how many items were pruned, how many deduplication hits occurred, and which models triggered fallbacks due to latency spikes. Use `result.stats().explain()` to get a human-readable summary.
+
+---
+
+## 🤖 AI Agent Ready
+Designed for autonomous integration. AI Agents (Cursor, Windsurf) can use our **[AI Integration Guide](docs/ai-integration.md)** and **`.cursorrules`** to safely extend the framework with zero hallucinations.
+
 ## 📚 Documentation
 - [Architecture Overview](docs/architecture.md)
 - [Execution Model & Optimizations](docs/execution-model.md)
