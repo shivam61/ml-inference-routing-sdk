@@ -1,0 +1,29 @@
+# AI Agent Guidelines for ML Inference Routing SDK
+
+## Project Context
+This is a Staff-Engineer level, production-quality ML inference orchestration SDK for latency-sensitive backend services. It treats ML inference as an execution-planning problem (DAG, batching, dedup, strict deadlines).
+
+## Architectural Constraints
+1. **No Application Frameworks in Core:** Do NOT use Spring, Guice, or Micronaut in the `ml-routing-core` module. It must be a plain Java library.
+2. **Java 21 Standards:** Strictly use Java 21 features (Records, Pattern Matching, virtual threads where applicable but bounded by ExecutorService).
+3. **Immutability First:** Use `record` for all domain objects (`RequestContext`, `ModelInput`, `Candidate`, etc.). Use immutable collections from `java.util.List.copyOf()` or `Collections.unmodifiable...`.
+4. **Resiliency:** NEVER write infinite retries on the hot path. Use strict deadline propagation and fallback strategies (`FallbackType`).
+5. **No Domain-Specific Jargon:** Keep terminology generic (e.g., Candidate, Score, Model). Do NOT use adtech, e-commerce, or company-specific terms (no "bids", "impressions", "clicks").
+
+## Module Specifics
+- `ml-routing-core`: Orchestration, DAG planning, batching, and async execution.
+- `ml-routing-vector-inference`: Uses Java Vector API (`jdk.incubator.vector`). **Must remain strictly optional**. Requires `--add-modules jdk.incubator.vector`.
+- `ml-routing-examples`: Runnable CLI examples.
+- `ml-routing-benchmarks`: Performance benchmarks comparing naive vs. optimized inference.
+
+## Coding Style
+- Write comprehensive JavaDocs for public interfaces.
+- Handle malformed configurations defensively.
+- Build clean, fluent API builders for complex setups.
+- Use `CompletableFuture` for asynchronous graph traversal. 
+- Ensure all execution threads have a timeout to prevent JVM starvation.
+
+## Testing
+- Use JUnit 5 + AssertJ.
+- Mockito is allowed but prefer Fake/In-Memory implementations for `ModelClient` tests to verify accurate DAG execution.
+- Validate cycle detection, lazy pruning, dedup hits, and fallback activations.
