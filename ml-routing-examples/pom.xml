@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.github.placeholder</groupId>
+        <groupId>io.github.shivam61</groupId>
         <artifactId>ml-inference-routing-sdk</artifactId>
         <version>1.0.0-SNAPSHOT</version>
     </parent>
@@ -15,11 +15,11 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.github.placeholder</groupId>
+            <groupId>io.github.shivam61</groupId>
             <artifactId>ml-routing-core</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.github.placeholder</groupId>
+            <groupId>io.github.shivam61</groupId>
             <artifactId>ml-routing-vector-inference</artifactId>
         </dependency>
         <dependency>

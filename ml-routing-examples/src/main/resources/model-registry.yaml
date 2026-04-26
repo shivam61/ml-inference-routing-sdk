@@ -2,6 +2,7 @@ models:
   - modelId: light_ranker
     modelFamily: ranking
     version: v1
+    endpoint: "local"
     backendType: LOCAL_VECTOR
     timeoutMs: 5
     maxBatchSize: 64
@@ -13,6 +14,7 @@ models:
   - modelId: deep_ranker
     modelFamily: ranking
     version: v1
+    endpoint: "http://triton:8001"
     backendType: REMOTE
     timeoutMs: 20
     maxBatchSize: 32
@@ -29,6 +31,7 @@ models:
   - modelId: risk_score
     modelFamily: risk
     version: v1
+    endpoint: "http://tfserving:8501"
     backendType: REMOTE
     timeoutMs: 15
     maxBatchSize: 32
@@ -40,6 +43,7 @@ models:
   - modelId: final_score
     modelFamily: final
     version: v1
+    endpoint: "local"
     backendType: IN_MEMORY
     timeoutMs: 5
     maxBatchSize: 128

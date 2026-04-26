@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.github.placeholder</groupId>
+    <groupId>io.github.shivam61</groupId>
     <artifactId>ml-inference-routing-sdk</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
@@ -19,6 +19,8 @@
         <module>ml-routing-benchmarks</module>
         <module>ml-routing-clients</module>
         <module>ml-routing-onnx</module>
+        <module>ml-routing-micrometer</module>
+        <module>ml-routing-spring-boot-starter</module>
     </modules>
 
     <properties>
@@ -38,12 +40,12 @@
         <dependencies>
             <!-- Core Dependencies -->
             <dependency>
-                <groupId>com.github.placeholder</groupId>
+                <groupId>io.github.shivam61</groupId>
                 <artifactId>ml-routing-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.github.placeholder</groupId>
+                <groupId>io.github.shivam61</groupId>
                 <artifactId>ml-routing-vector-inference</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -111,6 +113,12 @@
     </dependencyManagement>
 
     <build>
+        <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
         <pluginManagement>
             <plugins>
                 <plugin>
@@ -120,6 +128,7 @@
                     <configuration>
                         <compilerArgs>
                             <arg>-parameters</arg>
+                            <arg>--enable-preview</arg>
                         </compilerArgs>
                     </configuration>
                 </plugin>
@@ -127,6 +136,28 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.2.5</version>
+                    <configuration>
+                        <argLine>--enable-preview ${argLine}</argLine>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>0.8.11</version>
+                    <executions>
+                        <execution>
+                            <goals>
+                                <init>prepare-agent</goals>
+                            </goals>
+                        </execution>
+                        <execution>
+                            <id>report</id>
+                            <phase>test</phase>
+                            <goals>
+                                <goal>report</goal>
+                            </goals>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>

@@ -21,13 +21,5 @@ To use the vectorized inference engine, ensure the following:
    ```
 2. **Model Definition:** Set `backendType: LOCAL_VECTOR` in your `model-registry.yaml`.
 
-## Performance Comparison
-
-| Model Type | Scalar JVM Latency | Vectorized JVM Latency | Remote (Simulated) |
-|------------|-------------------|-----------------------|--------------------|
-| 128x64 Dense | ~150μs            | ~35μs                 | ~2ms - 5ms         |
-
-*Note: Vectorized inference is most beneficial for medium-sized dense layers. For extremely small layers, the overhead of vector setup might not be worth it; for extremely large models, a dedicated remote GPU serving stack is preferred.*
-
-## Fallback Mechanism
-The `VectorizedDenseLayer` includes an automatic scalar fallback for the "remainder" loop when the input dimension is not a perfect multiple of the hardware's vector lane count.
+## Graceful Degradation
+The `ml-routing-vector-inference` module is designed to be optional. If your environment does not support SIMD or if the `--add-modules` flag is missing, you should use the `IN_MEMORY` or `REMOTE` backends. The `VectorizedDenseLayer` itself includes a `computeScalar` method which can be used as a fallback if the Vector API is not available at runtime (though current implementation requires the module to compile).
