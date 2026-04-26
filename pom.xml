@@ -17,6 +17,8 @@
         <module>ml-routing-vector-inference</module>
         <module>ml-routing-examples</module>
         <module>ml-routing-benchmarks</module>
+        <module>ml-routing-clients</module>
+        <module>ml-routing-onnx</module>
     </modules>
 
     <properties>

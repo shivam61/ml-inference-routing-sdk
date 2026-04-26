@@ -9,7 +9,7 @@ models:
   - modelId: string          # Unique identifier for the model
     modelFamily: string      # Logical grouping (e.g., ranking, risk)
     version: string          # Model version tag
-    backendType: enum        # REMOTE, LOCAL_VECTOR, IN_MEMORY
+    backendType: enum        # REMOTE, TRITON, TF_SERVING, LOCAL_ONNX, LOCAL_VECTOR, IN_MEMORY
     timeoutMs: long          # Execution timeout
     maxBatchSize: int        # Max candidates per batch call
     dependencies: [string]   # List of upstream modelIds

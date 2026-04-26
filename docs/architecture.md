@@ -22,18 +22,22 @@ Transforms the set of selected models into a valid `InferencePlan`.
 
 ### 4. Inference Executor
 The engine that realizes the `InferencePlan`.
-- **Asynchronous Execution:** Uses `CompletableFuture` for non-blocking stage processing.
+- **Project Loom (Virtual Threads):** Uses Java 21 `Executors.newVirtualThreadPerTaskExecutor()` to handle high-concurrency without thread-starvation. The entire DAG traversal is non-blocking yet written in a clean, synchronous style.
+- **Circuit Breaker:** A zero-dependency resiliency layer that tracks model health. It prevents "waiting for timeouts" by proactively shedding load when a backend is detected as unhealthy.
 - **Batching:** Groups candidate requests to minimize network overhead.
 - **Deduplication:** Avoids redundant computations for identical feature sets within a single request.
-- **Lazy Execution:** Prunes candidates at runtime using predicates (e.g., only run a heavy ranker for the top N candidates of a light ranker).
+- **Lazy Execution:** Prunes candidates at runtime using predicates.
 
 ### 5. Model Clients
 Pluggable backends for actual inference.
 - `SimulatedModelClient`: For testing and benchmarking.
 - `LocalVectorizedModelClient`: High-performance SIMD execution using Java Vector API.
+- `TritonModelClient / TFServingModelClient`: Industry-standard remote serving integrations.
+- `LocalOnnxModelClient`: Local execution of complex pre-trained models via ONNX Runtime.
 - `CompositeModelClient`: Orchestrates routing across multiple client implementations.
 
 ## Design Principles
 - **Immutability:** All domain objects are immutable Java records.
-- **Resiliency:** Enforced timeouts and fallback strategies ensure system stability.
+- **Resiliency:** Enforced timeouts, circuit breakers, and fallback strategies ensure system stability.
+- **Modern Concurrency:** Leverages Virtual Threads for scalable I/O.
 - **Zero Framework Bloat:** The core module has no dependencies on Spring or other heavy frameworks.

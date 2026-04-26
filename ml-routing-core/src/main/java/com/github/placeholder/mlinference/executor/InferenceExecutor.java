@@ -9,33 +9,39 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
-public class InferenceExecutor {
+public class InferenceExecutor implements AutoCloseable {
     private final ModelClient client;
-    private final ExecutorService executorService;
+    private final ExecutorService vThreadExecutor;
     private final ScheduledExecutorService scheduler;
     private final MetricsRecorder metrics;
+    private final Map<String, CircuitBreaker> circuitBreakers = new ConcurrentHashMap<>();
 
-    public InferenceExecutor(ModelClient client, ExecutorService executorService, ScheduledExecutorService scheduler, MetricsRecorder metrics) {
+    public InferenceExecutor(ModelClient client, MetricsRecorder metrics) {
         this.client = client;
-        this.executorService = executorService;
-        this.scheduler = scheduler;
+        this.vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().factory());
         this.metrics = metrics;
     }
 
+    private CircuitBreaker getCircuitBreaker(String modelId) {
+        return circuitBreakers.computeIfAbsent(modelId, id -> new CircuitBreaker(id, 5, java.time.Duration.ofSeconds(10)));
+    }
+
     public CompletableFuture<InferenceResult> execute(InferencePlan plan, RequestContext context) {
-        Instant executionStart = Instant.now();
-        ExecutionState state = new ExecutionState(context);
+        return CompletableFuture.supplyAsync(() -> {
+            Instant executionStart = Instant.now();
+            ExecutionState state = new ExecutionState(context);
 
-        CompletableFuture<Void> pipeline = CompletableFuture.completedFuture(null);
+            try {
+                for (InferencePlan.ExecutionStage stage : plan.stages()) {
+                    executeStageSynchronously(stage, state, context);
+                }
+            } catch (Exception e) {
+                // Unexpected error in execution pipeline
+            }
 
-        for (InferencePlan.ExecutionStage stage : plan.stages()) {
-            pipeline = pipeline.thenCompose(v -> executeStage(stage, state, context));
-        }
-
-        return pipeline.handle((v, ex) -> {
             long totalLatency = Instant.now().toEpochMilli() - executionStart.toEpochMilli();
-            ExecutionStatus status = ex == null ? ExecutionStatus.SUCCESS : ExecutionStatus.FAILED;
-            if (state.hasFallbacks()) status = ExecutionStatus.PARTIAL_SUCCESS;
+            ExecutionStatus status = state.hasFallbacks() ? ExecutionStatus.PARTIAL_SUCCESS : ExecutionStatus.SUCCESS;
 
             return new InferenceResult(
                 context.requestId(),
@@ -46,66 +52,94 @@ public class InferenceExecutor {
                 new ExecutionTrace(state.getEvents()),
                 totalLatency
             );
-        });
+        }, vThreadExecutor);
     }
 
-    private CompletableFuture<Void> executeStage(InferencePlan.ExecutionStage stage, ExecutionState state, RequestContext context) {
-        List<CompletableFuture<Void>> modelFutures = stage.models().stream()
-            .map(model -> executeModel(model, state, context))
-            .toList();
-
-        return CompletableFuture.allOf(modelFutures.toArray(new CompletableFuture[0]));
+    private void executeStageSynchronously(InferencePlan.ExecutionStage stage, ExecutionState state, RequestContext context) throws InterruptedException, ExecutionException {
+        List<Future<Void>> futures = new ArrayList<>();
+        for (ModelDefinition model : stage.models()) {
+            futures.add(vThreadExecutor.submit(() -> {
+                executeModelSync(model, state, context);
+                return null;
+            }));
+        }
+        for (Future<Void> f : futures) {
+            f.get(); // Wait for all models in this stage to complete
+        }
     }
 
-    private CompletableFuture<Void> executeModel(ModelDefinition model, ExecutionState state, RequestContext context) {
+    private void executeModelSync(ModelDefinition model, ExecutionState state, RequestContext context) {
+        // 0. Check Circuit Breaker
+        CircuitBreaker cb = getCircuitBreaker(model.modelId());
+        if (!cb.allowRequest()) {
+            state.recordFallback(model.modelId(), null, FallbackType.SKIP_MODEL, "Circuit breaker is OPEN");
+            state.addEvent(new ExecutionEvent(Instant.now(), "CIRCUIT_BREAKER_OPEN", model.modelId(), Map.of()));
+            return;
+        }
+
         // 1. Check Global Deadline
         if (context.isDeadlineExceeded()) {
             state.recordFallback(model.modelId(), null, FallbackType.SKIP_MODEL, "Global deadline exceeded before model start");
-            return CompletableFuture.completedFuture(null);
+            return;
         }
 
         // 2. Identify candidates to run (Apply Lazy Pruning)
         List<Candidate> candidatesToRun = filterCandidates(model, state, context);
         if (candidatesToRun.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
+            return;
         }
 
         // 3. Deduplicate inputs
         List<ModelInput> uniqueInputs = deduplicate(model, candidatesToRun, state);
         if (uniqueInputs.isEmpty()) {
-            // All were deduped and already resolved in state
-            return CompletableFuture.completedFuture(null);
+            return;
         }
 
         // 4. Batching
         List<List<ModelInput>> batches = chunk(uniqueInputs, model.maxBatchSize());
         
-        List<CompletableFuture<Void>> batchFutures = batches.stream()
-            .map(batch -> executeBatch(model, batch, state, context))
-            .toList();
-
-        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]));
-    }
-
-    private CompletableFuture<Void> executeBatch(ModelDefinition model, List<ModelInput> batch, ExecutionState state, RequestContext context) {
-        long timeout = Math.min(model.timeoutMs(), context.getRemainingTimeMs());
-        
-        CompletableFuture<List<ModelOutput>> future = client.predict(model, batch, context);
-        
-        // Apply Timeout
-        if (timeout > 0) {
-            future = future.orTimeout(timeout, TimeUnit.MILLISECONDS);
+        List<Future<Void>> batchFutures = new ArrayList<>();
+        for (List<ModelInput> batch : batches) {
+            batchFutures.add(vThreadExecutor.submit(() -> {
+                executeBatchSync(model, batch, state, context, cb);
+                return null;
+            }));
         }
 
-        return future.handle((outputs, ex) -> {
-            if (ex != null) {
-                applyFallback(model, batch, state, ex);
-            } else {
-                state.recordOutputs(model.modelId(), outputs);
+        for (Future<Void> f : batchFutures) {
+            try {
+                f.get();
+            } catch (Exception e) {
+                // Handled within executeBatchSync
             }
-            return null;
-        });
+        }
     }
+
+    private void executeBatchSync(ModelDefinition model, List<ModelInput> batch, ExecutionState state, RequestContext context, CircuitBreaker cb) {
+        long timeout = Math.min(model.timeoutMs(), context.getRemainingTimeMs());
+        
+        try {
+            CompletableFuture<List<ModelOutput>> future = client.predict(model, batch, context);
+            List<ModelOutput> outputs;
+            if (timeout > 0) {
+                outputs = future.get(timeout, TimeUnit.MILLISECONDS);
+            } else {
+                outputs = future.get();
+            }
+            state.recordOutputs(model.modelId(), outputs);
+            cb.recordSuccess();
+        } catch (Exception ex) {
+            cb.recordFailure();
+            applyFallback(model, batch, state, ex);
+        }
+    }
+
+    @Override
+    public void close() {
+        vThreadExecutor.shutdown();
+        scheduler.shutdown();
+    }
+
 
     private List<Candidate> filterCandidates(ModelDefinition model, ExecutionState state, RequestContext context) {
         if (model.lazyPredicate() == null) return context.candidates();

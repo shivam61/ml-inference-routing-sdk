@@ -16,33 +16,30 @@ Imagine you are building an e-commerce app. A user searches for "sneakers". Your
 ## 💡 The Solution
 This SDK solves this problem by treating ML inference like a smart pipeline:
 1. **Lazy Pruning (Filtering early):** Instead of sending 1,000 items to a heavy remote model, the SDK first runs a super-fast, lightweight model *locally* on your server. It drops the bottom 900 items, and only sends the top 100 to the heavy remote model.
-2. **Batching (Grouping):** Instead of sending 100 individual requests, the SDK groups them into 2 batches of 50, drastically cutting down network traffic.
+2. **Batching (Grouping):** Instead of sending 100 individual requests, the SDK groups them into batches, drastically cutting down network traffic.
 3. **Deduplication:** If two items have the exact same features, the SDK only calculates the score once and reuses the answer.
-4. **Strict Deadlines & Fallbacks:** If the remote model takes longer than 50 milliseconds to answer, the SDK cuts it off. Instead of crashing or waiting forever, it returns a safe "default score" so the user still gets their search results instantly.
+4. **Circuit Breaking & Fallbacks:** If the remote model is slow or failing, the SDK "trips a breaker" and returns safe fallback values instantly, preventing your server from getting stuck waiting for a dying service.
+5. **Project Loom (Virtual Threads):** Built on Java 21, the SDK uses lightweight virtual threads to handle thousands of concurrent model calls without exhausting your server's memory.
 
 ---
 
 ## 🛠️ Step-by-Step: How to Use This Library
 
-Using this SDK requires three simple steps: define your models, set up your rules, and run the executor.
-
 ### Step 1: Define your Models (`model-registry.yaml`)
-You tell the SDK what models exist, how long they are allowed to take (`timeoutMs`), and what to do if they fail (`fallbackStrategy`).
+You tell the SDK what models exist. Now supports **Triton**, **TensorFlow Serving**, and **ONNX**.
 
 ```yaml
 models:
-  - modelId: my_heavy_ranker
-    backendType: REMOTE
-    timeoutMs: 50         # If it takes > 50ms, cut it off!
-    maxBatchSize: 32      # Send 32 items at a time
+  - modelId: deep_ranker
+    backendType: TRITON        # Or TF_SERVING, LOCAL_ONNX, LOCAL_VECTOR
+    timeoutMs: 50
+    maxBatchSize: 32
     fallbackStrategy:
       type: CONSTANT_SCORE
-      value: 0.5          # If it fails, just give everything a score of 0.5
+      value: 0.5
 ```
 
 ### Step 2: Define your Routing Rules (`routing-rules.yaml`)
-You tell the SDK *when* to use these models. For example, if a request is a "SEARCH", use the ranker.
-
 ```yaml
 rules:
   - ruleId: run_search_models
@@ -51,75 +48,44 @@ rules:
     condition:
       requestType: SEARCH
     selectedModels:
-      - my_heavy_ranker
+      - deep_ranker
 ```
 
-### Step 3: Run the Java Code
-Here is how you trigger the process in your application:
+### Step 3: Run the Java Code (AI Friendly & Modern)
+Thanks to Project Loom, you no longer need to manage complex thread pools.
 
 ```java
-// 1. Load your configurations
-ModelRegistry registry = new ModelRegistry();
-ConfigurationLoader.loadModels(new FileInputStream("model-registry.yaml")).forEach(registry::register);
-RoutingEngine routingEngine = new RoutingEngine(ConfigurationLoader.loadRules(new FileInputStream("routing-rules.yaml")));
+// 1. Setup your Executor (Now with automatic Virtual Thread management)
+try (InferenceExecutor executor = new InferenceExecutor(myModelClient, MetricsRecorder.NOOP)) {
+    
+    // 2. Create a Request
+    RequestContext context = new RequestContext("req-123", "SEARCH", Instant.now(), 
+        Instant.now().plusMillis(200), Map.of(), myCandidates, Map.of());
 
-// 2. Setup your Executor (The traffic controller)
-InferenceExecutor executor = new InferenceExecutor(myModelClient, threadPool, scheduler, metrics);
-
-// 3. Create a Request (e.g., User searches for something)
-RequestContext context = new RequestContext(
-    "req-123", "SEARCH", Instant.now(), Instant.now().plusMillis(200), // Global 200ms deadline!
-    Map.of(), myListOfCandidates, Map.of()
-);
-
-// 4. Execute! The SDK automatically batches, dedups, and enforces timeouts.
-Set<String> selectedModels = routingEngine.route(context);
-InferencePlan plan = new ExecutionPlanner(registry).plan(selectedModels);
-
-InferenceResult result = executor.execute(plan, context).get();
-
-System.out.println("Final Scores: " + result.outputsByModel());
+    // 3. Execute! (The SDK handles the DAG, batching, and circuit breaking)
+    InferenceResult result = executor.execute(plan, context).get();
+}
 ```
 
 ---
 
-## 🏗️ System Architecture (Under the Hood)
-
-When you ask the SDK to execute models, it builds a **Directed Acyclic Graph (DAG)**. This means it figures out what models depend on other models and runs independent ones in parallel.
-
-```mermaid
-graph TD
-    A[Incoming Request] --> B[Routing Engine]
-    B -->|Resolves Rules| C[Execution Planner]
-    C -->|Builds Execution Graph| D[Inference Executor]
-    
-    subgraph Parallel Execution Pipeline
-        D --> E(Batch Light Models)
-        E -->|Dedup cache| F[Run Local Fast Engine]
-        E -->|Dedup cache| G[Run Remote Light Ranker]
-        
-        F -->|Drop worst items| H(Batch Heavy Models)
-        G -->|Drop worst items| H
-        
-        H --> I[Run Remote Deep Ranker]
-        H --> J[Run Remote Risk Scorer]
-    end
-    
-    I -->|Deadline Check| K[Apply Default Score if too slow]
-    J -->|Success| L[Final Result Aggregation]
-    K --> L
-    L --> M[Return Results to User]
-```
+## 🤖 AI Agent Integration
+This SDK is designed to be **AI-agent friendly**. If you are using a tool like Cursor, Windsurf, or a custom agent:
+1. **Context-Aware:** Refer to `.cursorrules` in the root for strict architectural guidelines.
+2. **Declarative:** Most changes (adding models/rules) happen in YAML, reducing code-generation errors.
+3. **Traceable:** Use `InferenceResult.executionTrace()` to let your agent "see" exactly why a model was skipped or why a fallback was triggered.
 
 ---
 
 ## 📦 What's Inside this Repository?
 
 This is a Maven multi-module project:
-- `ml-routing-core`: The main library. Contains the logic for routing, batching, DAG planning, and fallbacks. No heavy frameworks (No Spring) so it boots instantly.
-- `ml-routing-vector-inference`: An optional add-on. It uses Java 21's new Vector API (SIMD) to run models directly on your CPU locally at lightning speed, avoiding network calls entirely.
-- `ml-routing-examples`: Fully runnable Java classes showing exactly how to use the code.
-- `ml-routing-benchmarks`: Speed tests comparing the naive approach vs. this SDK.
+- `ml-routing-core`: Core engine (DAG, Batching, Circuit Breaker). Uses **Project Loom**.
+- `ml-routing-clients`: High-performance clients for **NVIDIA Triton** and **TF Serving**.
+- `ml-routing-onnx`: Local execution for complex models via **ONNX Runtime**.
+- `ml-routing-vector-inference`: Local SIMD-accelerated inference via **Java Vector API**.
+- `ml-routing-examples`: Fully runnable Java classes.
+- `ml-routing-benchmarks`: Speed tests.
 
 ## 🚀 Quick Start (Running the Code)
 
@@ -143,6 +109,7 @@ mvn -pl ml-routing-examples exec:java -Dexec.mainClass="com.github.placeholder.m
 ## 📚 Deep Dive Documentation
 
 If you want to understand the advanced engineering behind this, check out our docs:
+- [AI Agent Integration Guide](docs/ai-integration.md)
 - [Architecture Design](docs/architecture.md)
 - [Execution Model (How Batching/Pruning works)](docs/execution-model.md)
 - [Local Vectorized Inference (SIMD)](docs/local-vectorized-inference.md)
