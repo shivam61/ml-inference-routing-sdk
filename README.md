@@ -118,7 +118,10 @@ Every result contains a detailed `ExecutionStats` object. The SDK can tell you e
 Designed for autonomous integration. AI Agents (Cursor, Windsurf) can use our **[AI Integration Guide](docs/ai-integration.md)** and **`.cursorrules`** to safely extend the framework with zero hallucinations.
 
 ## 📚 Documentation
-- [Architecture Overview](docs/architecture.md)
+
+The full documentation is available at **[shivam61.github.io/ml-inference-routing-sdk](https://shivam61.github.io/ml-inference-routing-sdk/)**.
+
+- [AI Agent Integration Guide](docs/ai-integration.md)
 - [Execution Model & Optimizations](docs/execution-model.md)
 - [Local Vectorized Inference (SIMD)](docs/local-vectorized-inference.md)
 - [Observability & Tracing](docs/observability.md)
